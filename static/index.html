@@ -1,0 +1,603 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>YouTube 下载器</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg: #0c0c0f;
+      --surface: #16161c;
+      --surface-hover: #1e1e26;
+      --border: #2a2a35;
+      --text: #f4f4f6;
+      --muted: #8b8b9a;
+      --accent: #ff3d3d;
+      --accent-soft: rgba(255, 61, 61, 0.15);
+      --success: #22c55e;
+      --radius: 14px;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: "DM Sans", system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      line-height: 1.5;
+    }
+
+    .bg-glow {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      background:
+        radial-gradient(ellipse 80% 50% at 50% -20%, rgba(255, 61, 61, 0.12), transparent),
+        radial-gradient(ellipse 60% 40% at 100% 100%, rgba(99, 102, 241, 0.08), transparent);
+    }
+
+    .container {
+      position: relative;
+      max-width: 640px;
+      margin: 0 auto;
+      padding: 3rem 1.25rem 4rem;
+    }
+
+    header {
+      text-align: center;
+      margin-bottom: 2.5rem;
+    }
+
+    .logo {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      margin-bottom: 0.75rem;
+    }
+
+    .logo-icon {
+      width: 40px;
+      height: 40px;
+      background: var(--accent);
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .logo-icon svg {
+      width: 22px;
+      height: 22px;
+      fill: white;
+    }
+
+    h1 {
+      font-size: 1.75rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+    }
+
+    .subtitle {
+      color: var(--muted);
+      font-size: 0.95rem;
+      margin-top: 0.35rem;
+    }
+
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1.5rem;
+      margin-bottom: 1.25rem;
+    }
+
+    .input-row {
+      display: flex;
+      gap: 0.75rem;
+      flex-wrap: wrap;
+    }
+
+    .url-input {
+      flex: 1;
+      min-width: 200px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 0.85rem 1rem;
+      color: var(--text);
+      font-size: 0.95rem;
+      font-family: inherit;
+      transition: border-color 0.2s;
+    }
+
+    .url-input:focus {
+      outline: none;
+      border-color: var(--accent);
+    }
+
+    .url-input::placeholder {
+      color: var(--muted);
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.4rem;
+      padding: 0.85rem 1.25rem;
+      font-size: 0.95rem;
+      font-weight: 600;
+      font-family: inherit;
+      border: none;
+      border-radius: 10px;
+      cursor: pointer;
+      transition: transform 0.15s, opacity 0.15s;
+    }
+
+    .btn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .btn:not(:disabled):hover {
+      transform: translateY(-1px);
+    }
+
+    .btn-primary {
+      background: var(--accent);
+      color: white;
+    }
+
+    .btn-secondary {
+      background: var(--surface-hover);
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+
+    .btn-mp3 {
+      background: var(--accent-soft);
+      color: var(--accent);
+      border: 1px solid rgba(255, 61, 61, 0.35);
+    }
+
+    .preview {
+      display: none;
+      gap: 1rem;
+      margin-top: 1.25rem;
+      padding-top: 1.25rem;
+      border-top: 1px solid var(--border);
+    }
+
+    .preview.visible {
+      display: flex;
+    }
+
+    .thumb {
+      width: 120px;
+      height: 68px;
+      object-fit: cover;
+      border-radius: 8px;
+      flex-shrink: 0;
+      background: var(--bg);
+    }
+
+    .preview-info {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .preview-title {
+      font-weight: 600;
+      font-size: 0.95rem;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+
+    .preview-meta {
+      color: var(--muted);
+      font-size: 0.8rem;
+      margin-top: 0.25rem;
+    }
+
+    .formats-label {
+      font-size: 0.8rem;
+      color: var(--muted);
+      margin: 1rem 0 0.5rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .format-grid {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+    }
+
+    .format-btn {
+      padding: 0.5rem 0.85rem;
+      font-size: 0.85rem;
+      font-weight: 500;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      cursor: pointer;
+      font-family: inherit;
+      transition: all 0.15s;
+    }
+
+    .format-btn:hover,
+    .format-btn.active {
+      border-color: var(--accent);
+      background: var(--accent-soft);
+      color: var(--accent);
+    }
+
+    .quick-actions {
+      display: flex;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+      margin-top: 1rem;
+    }
+
+    .progress-card {
+      display: none;
+      margin-top: 1rem;
+    }
+
+    .progress-card.visible {
+      display: block;
+    }
+
+    .progress-bar-wrap {
+      height: 8px;
+      background: var(--bg);
+      border-radius: 4px;
+      overflow: hidden;
+      margin: 0.75rem 0;
+    }
+
+    .progress-bar {
+      height: 100%;
+      background: linear-gradient(90deg, var(--accent), #ff6b6b);
+      border-radius: 4px;
+      width: 0%;
+      transition: width 0.3s ease;
+    }
+
+    .progress-text {
+      font-size: 0.85rem;
+      color: var(--muted);
+    }
+
+    .error-msg {
+      display: none;
+      padding: 0.75rem 1rem;
+      background: rgba(239, 68, 68, 0.12);
+      border: 1px solid rgba(239, 68, 68, 0.3);
+      border-radius: 10px;
+      color: #fca5a5;
+      font-size: 0.9rem;
+      margin-top: 1rem;
+    }
+
+    .error-msg.visible {
+      display: block;
+    }
+
+    .success-msg {
+      display: none;
+      padding: 0.75rem 1rem;
+      background: rgba(34, 197, 94, 0.12);
+      border: 1px solid rgba(34, 197, 94, 0.3);
+      border-radius: 10px;
+      color: #86efac;
+      font-size: 0.9rem;
+      margin-top: 1rem;
+    }
+
+    .success-msg.visible {
+      display: block;
+    }
+
+    footer {
+      text-align: center;
+      color: var(--muted);
+      font-size: 0.8rem;
+      margin-top: 2rem;
+    }
+
+    .spinner {
+      width: 18px;
+      height: 18px;
+      border: 2px solid rgba(255,255,255,0.3);
+      border-top-color: white;
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    @media (max-width: 480px) {
+      .preview.visible {
+        flex-direction: column;
+      }
+      .thumb {
+        width: 100%;
+        height: auto;
+        aspect-ratio: 16/9;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="bg-glow"></div>
+  <div class="container">
+    <header>
+      <div class="logo">
+        <div class="logo-icon">
+          <svg viewBox="0 0 24 24"><path d="M23.5 6.2a3 3 0 0 0-2.1-2.1C19.5 3.5 12 3.5 12 3.5s-7.5 0-9.4.6A3 3 0 0 0 .5 6.2C0 8.1 0 12 0 12s0 3.9.6 5.8a3 3 0 0 0 2.1 2.1c1.9.6 9.4.6 9.4.6s7.5 0 9.4-.6a3 3 0 0 0 2.1-2.1c.6-1.9.6-5.8.6-5.8s0-3.9-.6-5.8zM9.75 15.02V8.98L15.5 12l-5.75 3.02z"/></svg>
+        </div>
+      </div>
+      <h1>YouTube 下载器</h1>
+      <p class="subtitle">粘贴链接，下载 MP4 视频或 MP3 音频</p>
+    </header>
+
+    <div class="card">
+      <div class="input-row">
+        <input
+          type="url"
+          class="url-input"
+          id="urlInput"
+          placeholder="https://www.youtube.com/watch?v=..."
+          autocomplete="off"
+        />
+        <button class="btn btn-primary" id="analyzeBtn">解析</button>
+      </div>
+
+      <div class="error-msg" id="errorMsg"></div>
+
+      <div class="preview" id="preview">
+        <img class="thumb" id="thumb" alt="" />
+        <div class="preview-info">
+          <div class="preview-title" id="previewTitle"></div>
+          <div class="preview-meta" id="previewMeta"></div>
+        </div>
+      </div>
+
+      <div id="formatsSection" style="display:none">
+        <div class="formats-label">选择画质 (MP4)</div>
+        <div class="format-grid" id="formatGrid"></div>
+        <div class="quick-actions">
+          <button class="btn btn-primary" id="downloadVideoBtn">下载 MP4</button>
+          <button class="btn btn-mp3" id="downloadMp3Btn">下载 MP3</button>
+        </div>
+      </div>
+
+      <div class="progress-card" id="progressCard">
+        <div class="progress-text" id="progressText">准备中...</div>
+        <div class="progress-bar-wrap">
+          <div class="progress-bar" id="progressBar"></div>
+        </div>
+      </div>
+
+      <div class="success-msg" id="successMsg"></div>
+    </div>
+
+    <footer>仅供个人学习使用 · 请遵守 YouTube 服务条款</footer>
+  </div>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+
+    let currentUrl = "";
+    let currentInfo = null;
+    let selectedFormatId = "video_best";
+    let pollTimer = null;
+
+    function showError(msg) {
+      $("errorMsg").textContent = msg;
+      $("errorMsg").classList.add("visible");
+      $("successMsg").classList.remove("visible");
+    }
+
+    function hideError() {
+      $("errorMsg").classList.remove("visible");
+    }
+
+    function formatDuration(sec) {
+      if (!sec) return "";
+      const m = Math.floor(sec / 60);
+      const s = sec % 60;
+      return `${m}:${String(s).padStart(2, "0")}`;
+    }
+
+    async function analyze() {
+      const url = $("urlInput").value.trim();
+      if (!url) {
+        showError("请先粘贴 YouTube 链接");
+        return;
+      }
+
+      hideError();
+      $("preview").classList.remove("visible");
+      $("formatsSection").style.display = "none";
+      $("progressCard").classList.remove("visible");
+      $("successMsg").classList.remove("visible");
+
+      const btn = $("analyzeBtn");
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner"></span> 解析中';
+
+      try {
+        const res = await fetch("/api/info", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "解析失败");
+
+        currentUrl = url;
+        currentInfo = data;
+
+        $("thumb").src = data.thumbnail || "";
+        $("previewTitle").textContent = data.title || "未知标题";
+        $("previewMeta").textContent = [
+          data.uploader,
+          formatDuration(data.duration),
+        ].filter(Boolean).join(" · ");
+
+        $("preview").classList.add("visible");
+
+        const grid = $("formatGrid");
+        grid.innerHTML = "";
+        const videoFormats = (data.formats || []).filter((f) => f.type === "video");
+
+        if (videoFormats.length) {
+          videoFormats.forEach((f, i) => {
+            const b = document.createElement("button");
+            b.className = "format-btn" + (i === 0 ? " active" : "");
+            b.textContent = f.label;
+            b.dataset.id = f.id;
+            b.onclick = () => {
+              grid.querySelectorAll(".format-btn").forEach((el) => el.classList.remove("active"));
+              b.classList.add("active");
+              selectedFormatId = f.id;
+            };
+            grid.appendChild(b);
+          });
+          selectedFormatId = videoFormats[0].id;
+        } else {
+          selectedFormatId = "video_best";
+          const b = document.createElement("button");
+          b.className = "format-btn active";
+          b.textContent = "最佳画质";
+          b.dataset.id = "video_best";
+          grid.appendChild(b);
+        }
+
+        $("formatsSection").style.display = "block";
+      } catch (e) {
+        showError(e.message);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "解析";
+      }
+    }
+
+    async function startDownload(type) {
+      if (!currentUrl) {
+        showError("请先解析视频");
+        return;
+      }
+
+      hideError();
+      $("successMsg").classList.remove("visible");
+      $("progressCard").classList.add("visible");
+      $("progressBar").style.width = "0%";
+      $("progressText").textContent = "正在启动下载...";
+
+      const payload = {
+        url: currentUrl,
+        type: type === "mp3" ? "audio" : "video",
+        format_id: type === "mp3" ? "mp3" : selectedFormatId,
+      };
+
+      $("downloadVideoBtn").disabled = true;
+      $("downloadMp3Btn").disabled = true;
+      $("analyzeBtn").disabled = true;
+
+      try {
+        const res = await fetch("/api/download", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "下载失败");
+
+        pollStatus(data.job_id);
+      } catch (e) {
+        showError(e.message);
+        resetButtons();
+      }
+    }
+
+    function resetButtons() {
+      $("downloadVideoBtn").disabled = false;
+      $("downloadMp3Btn").disabled = false;
+      $("analyzeBtn").disabled = false;
+      $("progressCard").classList.remove("visible");
+    }
+
+    function pollStatus(jobId) {
+      if (pollTimer) clearInterval(pollTimer);
+
+      pollTimer = setInterval(async () => {
+        try {
+          const res = await fetch(`/api/status/${jobId}`);
+          const job = await res.json();
+
+          if (job.status === "downloading" || job.status === "processing") {
+            const pct = job.progress || 0;
+            $("progressBar").style.width = pct + "%";
+            $("progressText").textContent =
+              job.status === "processing" ? "正在转换格式..." : `下载中 ${pct}%`;
+          } else if (job.status === "done") {
+            clearInterval(pollTimer);
+            $("progressBar").style.width = "100%";
+            $("progressText").textContent = "完成！正在保存文件...";
+
+            const a = document.createElement("a");
+            a.href = `/api/file/${jobId}`;
+            a.download = job.filename || "download";
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+
+            $("successMsg").textContent = "下载已开始，请查看浏览器下载文件夹";
+            $("successMsg").classList.add("visible");
+            resetButtons();
+          } else if (job.status === "error") {
+            clearInterval(pollTimer);
+            showError(job.error || "下载出错");
+            resetButtons();
+          }
+        } catch {
+          clearInterval(pollTimer);
+          showError("连接中断，请重试");
+          resetButtons();
+        }
+      }, 800);
+    }
+
+    $("analyzeBtn").onclick = analyze;
+    $("downloadVideoBtn").onclick = () => startDownload("video");
+    $("downloadMp3Btn").onclick = () => startDownload("mp3");
+
+    $("urlInput").addEventListener("keydown", (e) => {
+      if (e.key === "Enter") analyze();
+    });
+
+    $("urlInput").addEventListener("paste", () => {
+      setTimeout(() => {
+        const v = $("urlInput").value.trim();
+        if (v && /youtube|youtu\.be/i.test(v)) analyze();
+      }, 100);
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,11 @@
+# Render 一键部署（免费 https://xxx.onrender.com 链接，类似 Vercel）
+# 用法：把项目推到 GitHub → render.com → New Blueprint → 选这个 repo
+services:
+  - type: web
+    name: youtube-downloader
+    runtime: docker
+    plan: free
+    healthCheckPath: /api/health
+    envVars:
+      - key: PORT
+        value: "8080"

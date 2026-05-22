@@ -445,8 +445,12 @@
           <ol class="login-steps">
             <li>Chrome 打开 <a href="https://www.youtube.com" target="_blank" rel="noopener">youtube.com</a> 并<strong>登录</strong></li>
             <li>安装扩展 <a href="https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc" target="_blank" rel="noopener">Get cookies.txt LOCALLY</a></li>
-            <li>在 YouTube 页面点扩展 → Export → 打开文件，<strong>全选复制</strong>到下面</li>
+            <li>在 <strong>YouTube 首页/视频页</strong>（不是 Google 账号页）点扩展 → Export</li>
+            <li>打开 <code>cookies.txt</code>，<strong>全选复制</strong>到下面（文件要有几千字符，且含 <code>SID</code>）</li>
           </ol>
+          <p id="cookieWeakHint" style="display:none;color:#fca5a5;margin-top:0.4rem">
+            ⚠️ 当前内容像「未登录」，缺少 SID。请确认 Chrome 已登录 YouTube 后重新 Export。
+          </p>
           <textarea
             class="cookies-input"
             id="cookiesInput"
@@ -455,6 +459,7 @@
           ></textarea>
           <div class="login-actions">
             <button type="button" class="btn btn-primary btn-small" id="saveCookiesBtn">保存到本浏览器</button>
+            <button type="button" class="btn btn-secondary btn-small" id="testCookiesBtn">测试 Cookies</button>
             <button type="button" class="btn btn-secondary btn-small" id="clearCookiesBtn">清除</button>
           </div>
           <p style="margin-top:0.5rem">仅存在你的浏览器；下载时发给服务器，用完即删。不要分享 Cookies 给别人。</p>
@@ -521,15 +526,26 @@
       }
     }
 
+    function hasSessionCookies(text) {
+      return /(\tSID\t|__Secure-1PSID|__Secure-3PSID|LOGIN_INFO|SAPISID)/.test(text);
+    }
+
     function updateLoginBadge() {
-      const ok = getSavedCookies().includes("youtube.com");
+      const text = getSavedCookies();
       const badge = $("loginBadge");
-      if (ok) {
-        badge.textContent = "已设置 ✓";
-        badge.className = "login-badge ok";
-      } else {
+      const weak = $("cookieWeakHint");
+      if (!text.toLowerCase().includes("youtube.com")) {
         badge.textContent = "未设置";
         badge.className = "login-badge no";
+        weak.style.display = "none";
+      } else if (!hasSessionCookies(text)) {
+        badge.textContent = "未登录";
+        badge.className = "login-badge no";
+        weak.style.display = "block";
+      } else {
+        badge.textContent = "已登录 ✓";
+        badge.className = "login-badge ok";
+        weak.style.display = "none";
       }
     }
 
@@ -540,32 +556,86 @@
       return body;
     }
 
+    function cleanUrl(url) {
+      const m = url.match(/(?:v=|youtu\.be\/|shorts\/)([a-zA-Z0-9_-]{11})/);
+      return m ? `https://www.youtube.com/watch?v=${m[1]}` : url;
+    }
+
     function requireCookies() {
-      if (!getSavedCookies().includes("youtube.com")) {
-        showError("请先在上方「设置 YouTube 登录」粘贴并保存 Cookies");
+      const text = getSavedCookies();
+      if (!text.toLowerCase().includes("youtube.com")) {
+        showError("请先在上方粘贴并保存 Cookies");
         $("loginPanel").open = true;
+        return false;
+      }
+      if (!hasSessionCookies(text)) {
+        showError("Cookies 缺少登录信息（SID）。请登录 YouTube 后重新 Export，再点「测试 Cookies」");
+        $("loginPanel").open = true;
+        $("cookieWeakHint").style.display = "block";
         return false;
       }
       return true;
     }
 
+    async function testCookies() {
+      const cookies = $("cookiesInput").value.trim() || getSavedCookies();
+      if (!cookies.toLowerCase().includes("youtube.com")) {
+        showError("请先粘贴完整 cookies.txt");
+        return;
+      }
+      const btn = $("testCookiesBtn");
+      btn.disabled = true;
+      btn.textContent = "测试中...";
+      try {
+        const res = await fetch("/api/test-cookies", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ cookies }),
+        });
+        const data = await res.json();
+        if (data.ok) {
+          localStorage.setItem(COOKIE_STORAGE_KEY, cookies);
+          updateLoginBadge();
+          hideError();
+          $("successMsg").textContent = data.message + (data.test_title ? `（${data.test_title}）` : "");
+          $("successMsg").classList.add("visible");
+        } else {
+          showError(data.error || "Cookies 无效");
+        }
+      } catch {
+        showError("无法连接服务器");
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "测试 Cookies";
+      }
+    }
+
     $("saveCookiesBtn").onclick = () => {
       const text = $("cookiesInput").value.trim();
-      if (!text.includes("youtube.com")) {
+      if (!text.toLowerCase().includes("youtube.com")) {
         showError("内容不像 cookies.txt，请从扩展 Export 后完整复制");
+        return;
+      }
+      if (!hasSessionCookies(text)) {
+        showError("缺少 SID 登录信息！请在 Chrome 登录 youtube.com 后，在 YouTube 页面 Export");
+        $("cookieWeakHint").style.display = "block";
         return;
       }
       try {
         localStorage.setItem(COOKIE_STORAGE_KEY, text);
         hideError();
         updateLoginBadge();
-        $("successMsg").textContent = "Cookies 已保存，可以解析下载了";
+        $("successMsg").textContent = "已保存，建议再点「测试 Cookies」确认";
         $("successMsg").classList.add("visible");
         setTimeout(() => $("successMsg").classList.remove("visible"), 3000);
       } catch {
         showError("保存失败，内容可能太大");
       }
     };
+
+    $("cookiesInput").addEventListener("input", updateLoginBadge);
+
+    $("testCookiesBtn").onclick = testCookies;
 
     $("clearCookiesBtn").onclick = () => {
       localStorage.removeItem(COOKIE_STORAGE_KEY);
@@ -595,7 +665,8 @@
     }
 
     async function analyze() {
-      const url = $("urlInput").value.trim();
+      let url = cleanUrl($("urlInput").value.trim());
+      $("urlInput").value = url;
       if (!url) {
         showError("请先粘贴 YouTube 链接");
         return;

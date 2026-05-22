@@ -311,6 +311,85 @@
       display: block;
     }
 
+    .login-panel {
+      margin-bottom: 1rem;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      overflow: hidden;
+    }
+
+    .login-panel summary {
+      padding: 0.75rem 1rem;
+      cursor: pointer;
+      font-weight: 600;
+      font-size: 0.9rem;
+      list-style: none;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: var(--bg);
+    }
+
+    .login-panel summary::-webkit-details-marker { display: none; }
+
+    .login-badge {
+      font-size: 0.75rem;
+      font-weight: 600;
+      padding: 0.2rem 0.5rem;
+      border-radius: 6px;
+    }
+
+    .login-badge.ok {
+      background: rgba(34, 197, 94, 0.15);
+      color: #86efac;
+    }
+
+    .login-badge.no {
+      background: rgba(234, 179, 8, 0.15);
+      color: #fde68a;
+    }
+
+    .login-body {
+      padding: 0 1rem 1rem;
+      font-size: 0.85rem;
+      color: var(--muted);
+    }
+
+    .login-steps {
+      margin: 0.5rem 0 0.75rem;
+      padding-left: 1.1rem;
+      line-height: 1.55;
+    }
+
+    .login-steps a { color: #93c5fd; }
+
+    .cookies-input {
+      width: 100%;
+      min-height: 72px;
+      max-height: 140px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 0.6rem 0.75rem;
+      color: var(--text);
+      font-family: ui-monospace, monospace;
+      font-size: 0.72rem;
+      resize: vertical;
+      margin-top: 0.5rem;
+    }
+
+    .login-actions {
+      display: flex;
+      gap: 0.5rem;
+      margin-top: 0.6rem;
+      flex-wrap: wrap;
+    }
+
+    .btn-small {
+      padding: 0.5rem 0.85rem;
+      font-size: 0.82rem;
+    }
+
     footer {
       text-align: center;
       color: var(--muted);
@@ -357,6 +436,30 @@
     </header>
 
     <div class="card">
+      <details class="login-panel" id="loginPanel" open>
+        <summary>
+          <span>🔐 设置 YouTube 登录（每台电脑设一次）</span>
+          <span class="login-badge no" id="loginBadge">未设置</span>
+        </summary>
+        <div class="login-body">
+          <ol class="login-steps">
+            <li>Chrome 打开 <a href="https://www.youtube.com" target="_blank" rel="noopener">youtube.com</a> 并<strong>登录</strong></li>
+            <li>安装扩展 <a href="https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc" target="_blank" rel="noopener">Get cookies.txt LOCALLY</a></li>
+            <li>在 YouTube 页面点扩展 → Export → 打开文件，<strong>全选复制</strong>到下面</li>
+          </ol>
+          <textarea
+            class="cookies-input"
+            id="cookiesInput"
+            placeholder="# Netscape HTTP Cookie File&#10;.youtube.com	TRUE	..."
+            spellcheck="false"
+          ></textarea>
+          <div class="login-actions">
+            <button type="button" class="btn btn-primary btn-small" id="saveCookiesBtn">保存到本浏览器</button>
+            <button type="button" class="btn btn-secondary btn-small" id="clearCookiesBtn">清除</button>
+          </div>
+          <p style="margin-top:0.5rem">仅存在你的浏览器；下载时发给服务器，用完即删。不要分享 Cookies 给别人。</p>
+        </div>
+      </details>
       <div class="input-row">
         <input
           type="url"
@@ -403,10 +506,76 @@
   <script>
     const $ = (id) => document.getElementById(id);
 
+    const COOKIE_STORAGE_KEY = "yt_downloader_cookies";
+
     let currentUrl = "";
     let currentInfo = null;
     let selectedFormatId = "video_best";
     let pollTimer = null;
+
+    function getSavedCookies() {
+      try {
+        return localStorage.getItem(COOKIE_STORAGE_KEY) || "";
+      } catch {
+        return "";
+      }
+    }
+
+    function updateLoginBadge() {
+      const ok = getSavedCookies().includes("youtube.com");
+      const badge = $("loginBadge");
+      if (ok) {
+        badge.textContent = "已设置 ✓";
+        badge.className = "login-badge ok";
+      } else {
+        badge.textContent = "未设置";
+        badge.className = "login-badge no";
+      }
+    }
+
+    function apiPayload(extra = {}) {
+      const cookies = getSavedCookies();
+      const body = { ...extra };
+      if (cookies) body.cookies = cookies;
+      return body;
+    }
+
+    function requireCookies() {
+      if (!getSavedCookies().includes("youtube.com")) {
+        showError("请先在上方「设置 YouTube 登录」粘贴并保存 Cookies");
+        $("loginPanel").open = true;
+        return false;
+      }
+      return true;
+    }
+
+    $("saveCookiesBtn").onclick = () => {
+      const text = $("cookiesInput").value.trim();
+      if (!text.includes("youtube.com")) {
+        showError("内容不像 cookies.txt，请从扩展 Export 后完整复制");
+        return;
+      }
+      try {
+        localStorage.setItem(COOKIE_STORAGE_KEY, text);
+        hideError();
+        updateLoginBadge();
+        $("successMsg").textContent = "Cookies 已保存，可以解析下载了";
+        $("successMsg").classList.add("visible");
+        setTimeout(() => $("successMsg").classList.remove("visible"), 3000);
+      } catch {
+        showError("保存失败，内容可能太大");
+      }
+    };
+
+    $("clearCookiesBtn").onclick = () => {
+      localStorage.removeItem(COOKIE_STORAGE_KEY);
+      $("cookiesInput").value = "";
+      updateLoginBadge();
+    };
+
+    const saved = getSavedCookies();
+    if (saved) $("cookiesInput").value = saved;
+    updateLoginBadge();
 
     function showError(msg) {
       $("errorMsg").textContent = msg;
@@ -431,6 +600,7 @@
         showError("请先粘贴 YouTube 链接");
         return;
       }
+      if (!requireCookies()) return;
 
       hideError();
       $("preview").classList.remove("visible");
@@ -446,7 +616,7 @@
         const res = await fetch("/api/info", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ url }),
+          body: JSON.stringify(apiPayload({ url })),
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || "解析失败");
@@ -511,11 +681,13 @@
       $("progressBar").style.width = "0%";
       $("progressText").textContent = "正在启动下载...";
 
-      const payload = {
+      if (!requireCookies()) return;
+
+      const payload = apiPayload({
         url: currentUrl,
         type: type === "mp3" ? "audio" : "video",
         format_id: type === "mp3" ? "mp3" : selectedFormatId,
-      };
+      });
 
       $("downloadVideoBtn").disabled = true;
       $("downloadMp3Btn").disabled = true;
@@ -599,6 +771,10 @@
         if (v && /youtube|youtu\.be/i.test(v)) analyze();
       }, 100);
     });
+
+    if (!getSavedCookies() && location.hostname.includes("onrender.com")) {
+      $("loginPanel").open = true;
+    }
   </script>
 </body>
 </html>

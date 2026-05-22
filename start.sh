@@ -17,7 +17,26 @@ if ! command -v ffmpeg &>/dev/null; then
   echo "  Ubuntu: sudo apt install ffmpeg"
 fi
 
-export PORT="${PORT:-8080}"
+# 若未指定 PORT，从 8080 起找第一个空闲端口
+if [ -z "$PORT" ]; then
+  for p in 8080 8081 8082 5001 5002; do
+    if ! lsof -i :"$p" -sTCP:LISTEN >/dev/null 2>&1; then
+      PORT=$p
+      break
+    fi
+  done
+  PORT="${PORT:-8081}"
+fi
+
+if lsof -i :"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+  echo "端口 $PORT 仍被占用。可手动结束："
+  echo "  lsof -i :$PORT"
+  echo "  kill <PID>"
+  echo "或指定其他端口： PORT=8081 ./start.sh"
+  exit 1
+fi
+
+export PORT
 echo ""
 echo "  YouTube 下载器已启动"
 echo "  本机访问: http://localhost:$PORT"

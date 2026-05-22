@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-import json
+import base64
 import os
 import re
 import shutil
-import tempfile
 import threading
 import time
 import uuid
@@ -15,7 +14,18 @@ from flask_cors import CORS
 
 import yt_dlp
 
+from piped_fallback import (
+    download_file as piped_download_file,
+    fetch_piped,
+    merge_av,
+    piped_info_dict,
+    pick_stream_url,
+    to_mp3,
+    video_id_from_url,
+)
+
 app = Flask(__name__, static_folder="static", static_url_path="")
+piped_cache: dict[str, dict] = {}
 CORS(app)
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -46,43 +56,177 @@ def is_valid_youtube_url(url: str) -> bool:
 
 CACHE_DIR = BASE_DIR / ".cache"
 CACHE_DIR.mkdir(exist_ok=True)
+COOKIES_PATH = BASE_DIR / "cookies.txt"
+USER_COOKIES_DIR = BASE_DIR / "user_cookies"
+USER_COOKIES_DIR.mkdir(exist_ok=True)
+MAX_COOKIE_BYTES = 512 * 1024
+
+# Try multiple clients; cloud (Render) often needs cookies + android/ios clients
+YOUTUBE_CLIENT_SETS = [
+    ["android_vr", "android", "web"],
+    ["ios", "mweb"],
+    ["tv_embedded", "web_safari"],
+    ["android", "web"],
+]
 
 
-def common_ydl_opts(**extra) -> dict:
-    """Shared options; cloud IPs (Render) need alternate YouTube clients."""
+def setup_cookies() -> str | None:
+    """Load cookies from env (Render) or cookies.txt — greatly improves cloud success."""
+    if COOKIES_PATH.exists() and COOKIES_PATH.stat().st_size > 0:
+        return str(COOKIES_PATH)
+
+    raw = os.environ.get("YOUTUBE_COOKIES", "").strip()
+    if not raw:
+        b64 = os.environ.get("YOUTUBE_COOKIES_B64", "").strip()
+        if b64:
+            try:
+                raw = base64.b64decode(b64).decode("utf-8")
+            except Exception:
+                return None
+
+    if raw and "# Netscape HTTP Cookie File" in raw:
+        COOKIES_PATH.write_text(raw, encoding="utf-8")
+        return str(COOKIES_PATH)
+    return None
+
+
+COOKIES_FILE = setup_cookies()
+
+
+def cookies_configured() -> bool:
+    return bool(COOKIES_FILE and Path(COOKIES_FILE).exists())
+
+
+def normalize_cookie_text(raw: str) -> str | None:
+    raw = (raw or "").strip()
+    if not raw or len(raw.encode("utf-8")) > MAX_COOKIE_BYTES:
+        return None
+    if "# Netscape HTTP Cookie File" not in raw and ".youtube.com" not in raw:
+        return None
+    return raw
+
+
+def cookies_from_body(data: dict | None) -> str | None:
+    if not data:
+        return None
+    return normalize_cookie_text(data.get("cookies", ""))
+
+
+def write_user_cookie_file(raw: str, suffix: str) -> str:
+    path = USER_COOKIES_DIR / f"{suffix}.txt"
+    path.write_text(raw, encoding="utf-8")
+    return str(path)
+
+
+def cleanup_cookie_file(path: str | None) -> None:
+    if not path:
+        return
+    try:
+        p = Path(path).resolve()
+        if p.parent == USER_COOKIES_DIR.resolve() and p.exists():
+            p.unlink()
+    except OSError:
+        pass
+
+
+def resolve_cookiefile(user_cookies: str | None, temp_id: str | None = None) -> str | None:
+    if user_cookies:
+        return write_user_cookie_file(user_cookies, temp_id or uuid.uuid4().hex[:12])
+    if COOKIES_FILE:
+        return COOKIES_FILE
+    return None
+
+
+def common_ydl_opts(
+    player_clients: list[str] | None = None,
+    cookiefile: str | None = None,
+    **extra,
+) -> dict:
+    clients = player_clients or YOUTUBE_CLIENT_SETS[0]
     opts = {
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
-        "socket_timeout": 30,
-        "retries": 3,
+        "socket_timeout": 60,
+        "retries": 5,
+        "fragment_retries": 5,
         "cachedir": str(CACHE_DIR),
-        # Helps when YouTube blocks datacenter IPs (common on Render/AWS)
         "extractor_args": {
             "youtube": {
-                "player_client": ["android", "web", "tv_embedded"],
+                "player_client": clients,
+                "player_skip": ["webpage"],
             }
         },
     }
+    node = shutil.which("node")
+    if node:
+        opts["js_runtimes"] = {"node": {"path": node}}
+    cf = cookiefile or COOKIES_FILE
+    if cf:
+        opts["cookiefile"] = cf
     opts.update(extra)
     return opts
 
 
-def friendly_youtube_error(err: str) -> str:
+def extract_youtube(
+    url: str,
+    download: bool = False,
+    cookiefile: str | None = None,
+    **extra,
+):
+    """Try several YouTube clients; optional per-user cookiefile."""
+    last_err = None
+    for clients in YOUTUBE_CLIENT_SETS:
+        opts = common_ydl_opts(player_clients=clients, cookiefile=cookiefile, **extra)
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                return ydl.extract_info(url, download=download)
+        except Exception as e:
+            last_err = e
+    raise last_err
+
+
+def extract_video_info(url: str, cookiefile: str | None = None) -> dict:
+    """yt-dlp first; Piped fallback only when no user/server cookies."""
+    try:
+        info = extract_youtube(
+            url, download=False, skip_download=True, cookiefile=cookiefile
+        )
+        info["source"] = "ytdlp"
+        return info
+    except Exception as ytdlp_err:
+        if cookiefile:
+            raise ytdlp_err
+        vid = video_id_from_url(url)
+        if not vid:
+            raise ytdlp_err
+        try:
+            piped = fetch_piped(vid)
+            piped_cache[vid] = piped
+            return piped_info_dict(piped, vid)
+        except Exception:
+            raise ytdlp_err
+
+
+def friendly_youtube_error(err: str, user_cookies: bool = False) -> str:
     lower = err.lower()
+    if user_cookies:
+        cookie_hint = "\n\n请重新导出 Cookies（可能已过期），或换一支公开视频试。"
+    else:
+        cookie_hint = (
+            "\n\n请点击页面上方「设置 YouTube 登录」，粘贴 cookies.txt（每台电脑设一次）。"
+        )
     if "not available" in lower or "video unavailable" in lower:
         return (
-            "YouTube 返回「视频不可用」。常见原因：\n"
-            "① Render 等云端 IP 被 YouTube 限制（不是你链接错了）\n"
-            "② 视频有地区/年龄/会员限制\n"
-            "③ 视频已删除或设为私密\n\n"
-            "建议：换一个公开视频试试；或在本机运行 ./start.sh 通常更稳定。"
+            "YouTube 拒绝了此视频（云端 IP 限制或视频不可用）。"
+            "请先在本页设置 YouTube Cookies。"
+            + cookie_hint
         )
-    if "sign in" in lower or "confirm your age" in lower:
-        return "该视频需要登录或年龄验证，云端服务器无法下载。"
+    if "sign in" in lower or "confirm your age" in lower or "not a bot" in lower:
+        return "YouTube 要求登录/验证。请先在本页「设置 YouTube 登录」粘贴 Cookies。" + cookie_hint
     if "private" in lower:
         return "这是私密视频，无法下载。"
-    return f"无法获取视频信息: {err}"
+    return f"无法获取视频信息: {err}" + cookie_hint
 
 
 @app.route("/")
@@ -93,7 +237,17 @@ def index():
 @app.route("/api/health")
 def health():
     ffmpeg_ok = shutil.which("ffmpeg") is not None
-    return jsonify({"status": "ok", "ffmpeg": ffmpeg_ok})
+    return jsonify(
+        {
+            "status": "ok",
+            "ffmpeg": ffmpeg_ok,
+            "cookies": cookies_configured(),
+            "user_cookies_supported": True,
+            "hint": None
+            if cookies_configured()
+            else "Paste cookies in the website (Plan B) or set YOUTUBE_COOKIES on Render",
+        }
+    )
 
 
 @app.route("/api/info", methods=["POST"])
@@ -106,13 +260,17 @@ def video_info():
     if not is_valid_youtube_url(url):
         return jsonify({"error": "无效的 YouTube 链接"}), 400
 
-    ydl_opts = common_ydl_opts(skip_download=True)
-
+    user_cookies = cookies_from_body(data)
+    temp_cookie = resolve_cookiefile(user_cookies, uuid.uuid4().hex[:10])
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
+        info = extract_video_info(url, cookiefile=temp_cookie)
     except Exception as e:
-        return jsonify({"error": friendly_youtube_error(str(e))}), 400
+        return jsonify(
+            {"error": friendly_youtube_error(str(e), user_cookies=bool(user_cookies))}
+        ), 400
+    finally:
+        if user_cookies:
+            cleanup_cookie_file(temp_cookie)
 
     formats = []
     seen = set()
@@ -165,6 +323,7 @@ def video_info():
             "uploader": info.get("uploader"),
             "formats": formats,
             "url": url,
+            "source": info.get("source", "ytdlp"),
         }
     )
 
@@ -180,8 +339,19 @@ def start_download():
     if not url or not is_valid_youtube_url(url):
         return jsonify({"error": "无效的链接"}), 400
 
+    user_cookies = cookies_from_body(data)
+    if data.get("cookies") and not user_cookies:
+        return jsonify({"error": "Cookies 格式无效，请粘贴完整 cookies.txt 内容"}), 400
+
     job_id = str(uuid.uuid4())[:8]
-    jobs[job_id] = {"status": "pending", "progress": 0, "error": None, "file": None}
+    jobs[job_id] = {
+        "status": "pending",
+        "progress": 0,
+        "error": None,
+        "file": None,
+        "user_cookies": bool(user_cookies),
+        "cookies_raw": user_cookies,
+    }
 
     thread = threading.Thread(
         target=run_download,
@@ -212,15 +382,69 @@ def progress_hook(job_id: str):
     return hook
 
 
+def run_piped_download(
+    job_id: str,
+    url: str,
+    format_id: str,
+    download_type: str,
+    title: str,
+):
+    vid = video_id_from_url(url)
+    if not vid:
+        raise RuntimeError("无效视频 ID")
+    data = piped_cache.get(vid) or fetch_piped(vid)
+    piped_cache[vid] = data
+
+    audio_only = download_type == "audio" or format_id == "mp3"
+    v_url, a_url = pick_stream_url(data, format_id, audio_only)
+
+    def prog(pct):
+        jobs[job_id]["progress"] = pct
+        jobs[job_id]["status"] = "downloading"
+
+    tmp_v = DOWNLOAD_DIR / f"{job_id}_v.tmp"
+    tmp_a = DOWNLOAD_DIR / f"{job_id}_a.tmp"
+
+    if audio_only:
+        piped_download_file(v_url, tmp_a, on_progress=prog)
+        out = DOWNLOAD_DIR / f"{job_id}.mp3"
+        if shutil.which("ffmpeg"):
+            to_mp3(tmp_a, out)
+            tmp_a.unlink(missing_ok=True)
+        else:
+            tmp_a.rename(out)
+    elif a_url and shutil.which("ffmpeg"):
+        piped_download_file(v_url, tmp_v, on_progress=lambda p: prog(min(70, p)))
+        jobs[job_id]["status"] = "processing"
+        piped_download_file(a_url, tmp_a, on_progress=lambda p: prog(70 + min(25, p // 4)))
+        out = DOWNLOAD_DIR / f"{job_id}.mp4"
+        merge_av(tmp_v, tmp_a, out)
+        tmp_v.unlink(missing_ok=True)
+        tmp_a.unlink(missing_ok=True)
+    else:
+        out = DOWNLOAD_DIR / f"{job_id}.mp4"
+        piped_download_file(v_url, out, on_progress=prog)
+
+    safe = re.sub(r'[<>:"/\\|?*]', "", title)[:80]
+    ext = out.suffix.lstrip(".")
+    jobs[job_id]["file"] = str(out)
+    jobs[job_id]["filename"] = f"{safe}.{ext}"
+    jobs[job_id]["status"] = "done"
+    jobs[job_id]["progress"] = 100
+
+
 def run_download(job_id: str, url: str, format_id: str, download_type: str):
     jobs[job_id]["status"] = "downloading"
     out_base = str(DOWNLOAD_DIR / f"{job_id}")
+    title = "download"
+    user_cookies = jobs[job_id].get("cookies_raw")
+    temp_cookie = resolve_cookiefile(user_cookies, job_id) if user_cookies else None
 
     try:
+        extra: dict = {"outtmpl": out_base + ".%(ext)s", "progress_hooks": [progress_hook(job_id)]}
         if download_type == "audio" or format_id == "mp3":
-            ydl_opts = common_ydl_opts(
+            extra.update(
                 format="bestaudio/best",
-                outtmpl=out_base + ".%(ext)s",
                 postprocessors=[
                     {
                         "key": "FFmpegExtractAudio",
@@ -228,36 +452,28 @@ def run_download(job_id: str, url: str, format_id: str, download_type: str):
                         "preferredquality": "192",
                     }
                 ],
-                progress_hooks=[progress_hook(job_id)],
             )
         elif format_id.startswith("video_"):
             height = format_id.replace("video_", "")
-            ydl_opts = common_ydl_opts(
+            extra.update(
                 format=f"bestvideo[height<={height}]+bestaudio/best[height<={height}]/best",
-                outtmpl=out_base + ".%(ext)s",
                 merge_output_format="mp4",
-                progress_hooks=[progress_hook(job_id)],
             )
             if shutil.which("ffmpeg"):
-                ydl_opts["postprocessors"] = [
+                extra["postprocessors"] = [
                     {"key": "FFmpegVideoConvertor", "preferredformat": "mp4"}
                 ]
         else:
-            ydl_opts = common_ydl_opts(
+            extra.update(
                 format="bestvideo+bestaudio/best",
-                outtmpl=out_base + ".%(ext)s",
                 merge_output_format="mp4",
-                progress_hooks=[progress_hook(job_id)],
             )
 
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            title = info.get("title", "download")
+        info = extract_youtube(url, download=True, cookiefile=temp_cookie, **extra)
+        title = info.get("title", "download")
 
-        # Find output file
         candidates = list(DOWNLOAD_DIR.glob(f"{job_id}.*"))
         if not candidates:
-            # yt-dlp may use different naming
             candidates = sorted(
                 DOWNLOAD_DIR.glob("*"),
                 key=lambda p: p.stat().st_mtime,
@@ -276,9 +492,31 @@ def run_download(job_id: str, url: str, format_id: str, download_type: str):
         jobs[job_id]["status"] = "done"
         jobs[job_id]["progress"] = 100
 
-    except Exception as e:
-        jobs[job_id]["status"] = "error"
-        jobs[job_id]["error"] = str(e)
+    except Exception as ytdlp_err:
+        if user_cookies:
+            jobs[job_id]["status"] = "error"
+            jobs[job_id]["error"] = friendly_youtube_error(
+                str(ytdlp_err), user_cookies=True
+            )
+            return
+        vid = video_id_from_url(url)
+        if not vid:
+            jobs[job_id]["status"] = "error"
+            jobs[job_id]["error"] = friendly_youtube_error(str(ytdlp_err))
+            return
+        try:
+            data = piped_cache.get(vid) or fetch_piped(vid)
+            piped_cache[vid] = data
+            title = data.get("title", "download")
+            jobs[job_id]["status"] = "downloading"
+            jobs[job_id]["progress"] = 5
+            run_piped_download(job_id, url, format_id, download_type, title)
+        except Exception as e2:
+            jobs[job_id]["status"] = "error"
+            jobs[job_id]["error"] = friendly_youtube_error(str(e2))
+    finally:
+        cleanup_cookie_file(temp_cookie)
+        jobs[job_id].pop("cookies_raw", None)
 
 
 @app.route("/api/status/<job_id>")

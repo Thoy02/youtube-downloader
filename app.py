@@ -44,17 +44,45 @@ def is_valid_youtube_url(url: str) -> bool:
     return any(re.search(p, url, re.I) for p in patterns)
 
 
-def get_ydl_opts(out_template: str, format_selector: str | None = None) -> dict:
+CACHE_DIR = BASE_DIR / ".cache"
+CACHE_DIR.mkdir(exist_ok=True)
+
+
+def common_ydl_opts(**extra) -> dict:
+    """Shared options; cloud IPs (Render) need alternate YouTube clients."""
     opts = {
-        "outtmpl": out_template,
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
         "socket_timeout": 30,
+        "retries": 3,
+        "cachedir": str(CACHE_DIR),
+        # Helps when YouTube blocks datacenter IPs (common on Render/AWS)
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["android", "web", "tv_embedded"],
+            }
+        },
     }
-    if format_selector:
-        opts["format"] = format_selector
+    opts.update(extra)
     return opts
+
+
+def friendly_youtube_error(err: str) -> str:
+    lower = err.lower()
+    if "not available" in lower or "video unavailable" in lower:
+        return (
+            "YouTube 返回「视频不可用」。常见原因：\n"
+            "① Render 等云端 IP 被 YouTube 限制（不是你链接错了）\n"
+            "② 视频有地区/年龄/会员限制\n"
+            "③ 视频已删除或设为私密\n\n"
+            "建议：换一个公开视频试试；或在本机运行 ./start.sh 通常更稳定。"
+        )
+    if "sign in" in lower or "confirm your age" in lower:
+        return "该视频需要登录或年龄验证，云端服务器无法下载。"
+    if "private" in lower:
+        return "这是私密视频，无法下载。"
+    return f"无法获取视频信息: {err}"
 
 
 @app.route("/")
@@ -78,18 +106,13 @@ def video_info():
     if not is_valid_youtube_url(url):
         return jsonify({"error": "无效的 YouTube 链接"}), 400
 
-    ydl_opts = {
-        "quiet": True,
-        "no_warnings": True,
-        "noplaylist": True,
-        "skip_download": True,
-    }
+    ydl_opts = common_ydl_opts(skip_download=True)
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
     except Exception as e:
-        return jsonify({"error": f"无法获取视频信息: {str(e)}"}), 400
+        return jsonify({"error": friendly_youtube_error(str(e))}), 400
 
     formats = []
     seen = set()
@@ -195,46 +218,37 @@ def run_download(job_id: str, url: str, format_id: str, download_type: str):
 
     try:
         if download_type == "audio" or format_id == "mp3":
-            ydl_opts = {
-                "format": "bestaudio/best",
-                "outtmpl": out_base + ".%(ext)s",
-                "quiet": True,
-                "noplaylist": True,
-                "postprocessors": [
+            ydl_opts = common_ydl_opts(
+                format="bestaudio/best",
+                outtmpl=out_base + ".%(ext)s",
+                postprocessors=[
                     {
                         "key": "FFmpegExtractAudio",
                         "preferredcodec": "mp3",
                         "preferredquality": "192",
                     }
                 ],
-                "progress_hooks": [progress_hook(job_id)],
-            }
-            expected_ext = "mp3"
+                progress_hooks=[progress_hook(job_id)],
+            )
         elif format_id.startswith("video_"):
             height = format_id.replace("video_", "")
-            ydl_opts = {
-                "format": f"bestvideo[height<={height}]+bestaudio/best[height<={height}]/best",
-                "outtmpl": out_base + ".%(ext)s",
-                "quiet": True,
-                "noplaylist": True,
-                "merge_output_format": "mp4",
-                "progress_hooks": [progress_hook(job_id)],
-            }
+            ydl_opts = common_ydl_opts(
+                format=f"bestvideo[height<={height}]+bestaudio/best[height<={height}]/best",
+                outtmpl=out_base + ".%(ext)s",
+                merge_output_format="mp4",
+                progress_hooks=[progress_hook(job_id)],
+            )
             if shutil.which("ffmpeg"):
                 ydl_opts["postprocessors"] = [
                     {"key": "FFmpegVideoConvertor", "preferredformat": "mp4"}
                 ]
-            expected_ext = "mp4"
         else:
-            ydl_opts = {
-                "format": "bestvideo+bestaudio/best",
-                "outtmpl": out_base + ".%(ext)s",
-                "quiet": True,
-                "noplaylist": True,
-                "merge_output_format": "mp4",
-                "progress_hooks": [progress_hook(job_id)],
-            }
-            expected_ext = "mp4"
+            ydl_opts = common_ydl_opts(
+                format="bestvideo+bestaudio/best",
+                outtmpl=out_base + ".%(ext)s",
+                merge_output_format="mp4",
+                progress_hooks=[progress_hook(job_id)],
+            )
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)

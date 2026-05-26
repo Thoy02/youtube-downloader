@@ -462,7 +462,7 @@
             <button type="button" class="btn btn-secondary btn-small" id="testCookiesBtn">测试 Cookies</button>
             <button type="button" class="btn btn-secondary btn-small" id="clearCookiesBtn">清除</button>
           </div>
-          <p style="margin-top:0.5rem">仅存在你的浏览器；下载时发给服务器，用完即删。不要分享 Cookies 给别人。</p>
+          <p style="margin-top:0.5rem">仅存在你的浏览器；下载时发给服务器，用完即删。<strong>切勿把 Cookies 发到聊天/网上</strong>，否则 Google 会作废，需重新 Export。</p>
         </div>
       </details>
       <div class="input-row">
@@ -732,6 +732,11 @@
         }
 
         $("formatsSection").style.display = "block";
+        if (data.source === "piped") {
+          $("successMsg").textContent = "已通过备用线路解析（下载也将走备用线路，避免 403）";
+          $("successMsg").classList.add("visible");
+          setTimeout(() => $("successMsg").classList.remove("visible"), 4000);
+        }
       } catch (e) {
         showError(e.message);
       } finally {
@@ -754,10 +759,12 @@
 
       if (!requireCookies()) return;
 
+      hideError();
       const payload = apiPayload({
         url: currentUrl,
         type: type === "mp3" ? "audio" : "video",
         format_id: type === "mp3" ? "mp3" : selectedFormatId,
+        source: currentInfo?.source || "",
       });
 
       $("downloadVideoBtn").disabled = true;

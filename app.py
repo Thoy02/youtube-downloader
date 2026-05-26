@@ -36,6 +36,18 @@ DOWNLOAD_DIR.mkdir(exist_ok=True)
 CLEANUP_MAX_AGE = 2 * 60 * 60
 
 
+def strip_ansi(text: str) -> str:
+    return re.sub(r"\x1b\[[0-9;]*m", "", text or "")
+
+
+def is_render_host() -> bool:
+    return bool(
+        os.environ.get("RENDER")
+        or os.environ.get("RENDER_SERVICE_NAME")
+        or "onrender.com" in os.environ.get("RENDER_EXTERNAL_URL", "")
+    )
+
+
 def cleanup_old_files():
     now = time.time()
     for path in DOWNLOAD_DIR.iterdir():
@@ -189,6 +201,8 @@ def common_ydl_opts(
     cf = cookiefile or COOKIES_FILE
     if cf:
         opts["cookiefile"] = cf
+    # 避免云端探测格式 URL 时触发 403
+    opts.setdefault("check_formats", False)
     opts.update(extra)
     return opts
 
@@ -231,8 +245,17 @@ def try_piped_info(url: str) -> dict:
 
 
 def extract_video_info(url: str, cookiefile: str | None = None) -> dict:
-    """yt-dlp first; Piped fallback if that fails (even with cookies)."""
+    """Render: try backup API first; then yt-dlp; then backup again."""
     url = clean_youtube_url(url)
+
+    if is_render_host():
+        try:
+            result = try_piped_info(url)
+            result["source"] = "piped"
+            return result
+        except Exception:
+            pass
+
     try:
         info = extract_youtube(
             url, download=False, skip_download=True, cookiefile=cookiefile
@@ -256,6 +279,7 @@ def extract_video_info(url: str, cookiefile: str | None = None) -> dict:
 
 
 def friendly_youtube_error(err: str, user_cookies: bool = False) -> str:
+    err = strip_ansi(err)
     lower = err.lower()
     if user_cookies:
         cookie_hint = "\n\n请重新导出 Cookies（可能已过期），或换一支公开视频试。"
@@ -270,9 +294,26 @@ def friendly_youtube_error(err: str, user_cookies: bool = False) -> str:
             + cookie_hint
         )
     if "sign in" in lower or "confirm your age" in lower or "not a bot" in lower:
-        return "YouTube 要求登录/验证。请先在本页「设置 YouTube 登录」粘贴 Cookies。" + cookie_hint
+        return (
+            "YouTube 在 Render 云端拒绝了请求（即使用户 Cookies 也可能被挡）。\n"
+            "请按顺序试：\n"
+            "1) 重新 Export 新的 cookies.txt（旧的可能已过期，尤其曾复制到别处）\n"
+            "2) 点「测试 Cookies」必须显示成功\n"
+            "3) 换一支普通公开 MV\n"
+            "4) 本机 ./start.sh 若能用，说明是 Render 限制，不是链接问题"
+            + cookie_hint
+        )
     if "private" in lower:
         return "这是私密视频，无法下载。"
+    if "403" in lower or "forbidden" in lower:
+        return (
+            "YouTube 返回 403（禁止访问）。Render 云端常被挡，即使用 Cookies 也可能失败。\n"
+            "建议：\n"
+            "1) 重新 Export 新 Cookies 并点「测试 Cookies」\n"
+            "2) 换一支公开 MV\n"
+            "3) 本机运行 ./start.sh 下载（本机一般不会出现 403）"
+            + cookie_hint
+        )
     return f"无法获取视频信息: {err}" + cookie_hint
 
 
@@ -359,6 +400,20 @@ def video_info():
         if user_cookies:
             cleanup_cookie_file(temp_cookie)
 
+    if info.get("source") == "piped" and info.get("formats"):
+        return jsonify(
+            {
+                "id": info.get("id"),
+                "title": info.get("title"),
+                "thumbnail": info.get("thumbnail"),
+                "duration": info.get("duration"),
+                "uploader": info.get("uploader"),
+                "formats": info["formats"],
+                "url": url,
+                "source": "piped",
+            }
+        )
+
     formats = []
     seen = set()
 
@@ -430,6 +485,8 @@ def start_download():
     if data.get("cookies") and not user_cookies:
         return jsonify({"error": "Cookies 格式无效，请粘贴完整 cookies.txt 内容"}), 400
 
+    info_source = (data.get("source") or "").strip()
+
     job_id = str(uuid.uuid4())[:8]
     jobs[job_id] = {
         "status": "pending",
@@ -438,6 +495,7 @@ def start_download():
         "file": None,
         "user_cookies": bool(user_cookies),
         "cookies_raw": user_cookies,
+        "source": info_source,
     }
 
     thread = threading.Thread(
@@ -520,12 +578,37 @@ def run_piped_download(
     jobs[job_id]["progress"] = 100
 
 
+def try_piped_job(job_id: str, url: str, format_id: str, download_type: str) -> bool:
+    """Return True if piped/invidious download succeeded."""
+    vid = video_id_from_url(url)
+    if not vid:
+        return False
+    try:
+        data = piped_cache.get(vid) or fetch_piped(vid)
+        piped_cache[vid] = data
+        title = data.get("title", "download")
+        jobs[job_id]["status"] = "downloading"
+        jobs[job_id]["progress"] = 5
+        run_piped_download(job_id, url, format_id, download_type, title)
+        return True
+    except Exception:
+        return False
+
+
 def run_download(job_id: str, url: str, format_id: str, download_type: str):
     jobs[job_id]["status"] = "downloading"
     out_base = str(DOWNLOAD_DIR / f"{job_id}")
     title = "download"
     user_cookies = jobs[job_id].get("cookies_raw")
     temp_cookie = resolve_cookiefile(user_cookies, job_id) if user_cookies else None
+    info_source = jobs[job_id].get("source") or ""
+
+    # Render / 备用解析 → 直接用 Piped 下载，避免 yt-dlp 403
+    if info_source == "piped" or is_render_host():
+        if try_piped_job(job_id, url, format_id, download_type):
+            cleanup_cookie_file(temp_cookie)
+            jobs[job_id].pop("cookies_raw", None)
+            return
 
     try:
         extra: dict = {"outtmpl": out_base + ".%(ext)s", "progress_hooks": [progress_hook(job_id)]}
@@ -580,19 +663,9 @@ def run_download(job_id: str, url: str, format_id: str, download_type: str):
         jobs[job_id]["progress"] = 100
 
     except Exception as ytdlp_err:
+        if try_piped_job(job_id, url, format_id, download_type):
+            return
         if user_cookies:
-            try:
-                vid = video_id_from_url(url)
-                if vid:
-                    data = piped_cache.get(vid) or fetch_piped(vid)
-                    piped_cache[vid] = data
-                    title = data.get("title", "download")
-                    jobs[job_id]["status"] = "downloading"
-                    jobs[job_id]["progress"] = 5
-                    run_piped_download(job_id, url, format_id, download_type, title)
-                    return
-            except Exception:
-                pass
             jobs[job_id]["status"] = "error"
             jobs[job_id]["error"] = friendly_youtube_error(
                 str(ytdlp_err), user_cookies=True
@@ -612,7 +685,9 @@ def run_download(job_id: str, url: str, format_id: str, download_type: str):
             run_piped_download(job_id, url, format_id, download_type, title)
         except Exception as e2:
             jobs[job_id]["status"] = "error"
-            jobs[job_id]["error"] = friendly_youtube_error(str(e2))
+            jobs[job_id]["error"] = friendly_youtube_error(
+                str(e2), user_cookies=bool(user_cookies)
+            )
     finally:
         cleanup_cookie_file(temp_cookie)
         jobs[job_id].pop("cookies_raw", None)

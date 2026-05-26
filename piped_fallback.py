@@ -8,9 +8,20 @@ import urllib.request
 from pathlib import Path
 
 PIPED_APIS = [
+    "https://pipedapi.tokhmi.xyz",
+    "https://pipedapi.syncpundit.io",
+    "https://api-piped.mha.fi",
+    "https://pipedapi.moomoo.me",
     "https://pipedapi.kavin.rocks",
     "https://pipedapi.adminforge.de",
-    "https://api.piped.projectsegfau.lt",
+    "https://pipedapi-libre.kavin.rocks",
+]
+
+INVIDIOUS_APIS = [
+    "https://invidious.privacyredirect.com",
+    "https://inv.nadeko.net",
+    "https://yt.chocolatemoo53.com",
+    "https://invidious.f5.si",
 ]
 
 UA = "Mozilla/5.0 (compatible; YouTubeDownloader/1.0)"
@@ -21,19 +32,66 @@ def video_id_from_url(url: str) -> str | None:
     return m.group(1) if m else None
 
 
+def _fetch_json(url: str) -> dict:
+    req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": "application/json"})
+    with urllib.request.urlopen(req, timeout=45) as resp:
+        raw = resp.read().decode()
+        if not raw.strip().startswith("{"):
+            raise ValueError("not json")
+        return json.loads(raw)
+
+
+def fetch_invidious(video_id: str) -> dict:
+    """Invidious fallback when Piped instances are down."""
+    last_err = None
+    for base in INVIDIOUS_APIS:
+        try:
+            data = _fetch_json(f"{base}/api/v1/videos/{video_id}")
+            formats = []
+            for f in data.get("adaptiveFormats") or []:
+                if f.get("type", "").startswith("video/"):
+                    h = f.get("resolution", "")
+                    if h.endswith("p"):
+                        formats.append({"quality": h, "url": f.get("url")})
+            return {
+                "title": data.get("title"),
+                "thumbnailUrl": data.get("videoThumbnails", [{}])[0].get("url"),
+                "duration": data.get("lengthSeconds"),
+                "uploader": data.get("author"),
+                "videoStreams": [
+                    {
+                        "url": f["url"],
+                        "quality": f.get("quality", "720p"),
+                        "videoOnly": False,
+                    }
+                    for f in formats
+                    if f.get("url")
+                ],
+                "audioStreams": [
+                    {
+                        "url": f.get("url"),
+                        "bitrate": f.get("bitrate", 128000),
+                    }
+                    for f in (data.get("adaptiveFormats") or [])
+                    if f.get("type", "").startswith("audio/")
+                ],
+            }
+        except Exception as e:
+            last_err = e
+    raise RuntimeError(f"Invidious 备用失败: {last_err}")
+
+
 def fetch_piped(video_id: str) -> dict:
     last_err = None
     for base in PIPED_APIS:
         try:
-            req = urllib.request.Request(
-                f"{base}/streams/{video_id}",
-                headers={"User-Agent": UA},
-            )
-            with urllib.request.urlopen(req, timeout=45) as resp:
-                return json.loads(resp.read().decode())
+            return _fetch_json(f"{base}/streams/{video_id}")
         except Exception as e:
             last_err = e
-    raise RuntimeError(f"Piped 备用线路失败: {last_err}")
+    try:
+        return fetch_invidious(video_id)
+    except Exception as e2:
+        raise RuntimeError(f"Piped/Invidious 备用均失败: {last_err}; {e2}") from e2
 
 
 def _parse_height(quality: str) -> int:
